@@ -21,6 +21,13 @@ target/
 /token
 .git-cred-helper.sh
 
+# Runtime analysis data and disposable test fixtures
+.rat-data/
+.test-artifacts/
+*.sqlite3
+*.sqlite3-wal
+*.sqlite3-shm
+
 # Logs
 *.log
 logs/
