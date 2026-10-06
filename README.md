@@ -80,6 +80,18 @@ Optional offline demo: `.venv/bin/python tests/demo_fixture.py` creates `.test-a
 
 Optional scale test: `.venv/bin/python tests/benchmark.py --commits 100000 --author-query`. A synthetic 100,000-commit/200-file run measured approximately 3.1 seconds to index, 0.7 seconds for root metrics, and 0.12 seconds for an author query (local machine; excludes clone time). Real repositories with large diffs and many merge boundaries can take longer. Files and authors are paginated in the UI; common query results are cached and invalidated after merges.
 
+## Reference-metric verification
+
+The implementation was validated against the published sample metrics for the three provided repositories. At each reference commit below, every repository, file, directory, and per-object author value (added, removed, growth, churn, modifications, frequency, churn rate, ownership) reproduces the published sample exactly — 0 deviations across roughly 290,000 compared values:
+
+| Repository | Reference commit | Non-merge commits analysed |
+| --- | --- | --- |
+| cJSON | `6d9f2443ab071f86e5d9b43025a40929ec41c46c` | 955 |
+| Redis | `b540ca49cba815f3fbe634363c3df68d4f4f127a` | 11,874 |
+| Git | `5a7d1e8045ce66c908f62598e26cbb8df7b39a90` | 61,101 |
+
+Example (cJSON @ `6d9f2443`): added 46,377; removed 11,211; growth 35,166; churn 57,588; modifications 953; frequency 0.9979057591623037; churn rate 60.30157068062828; 107 authors; top ownership 83.6841% (Max Bruckner). Enter the reference commit hash in the import dialog to reproduce a specific snapshot.
+
 ## API
 
 All endpoints are same-origin and return JSON errors as `{ "error": "..." }`.
