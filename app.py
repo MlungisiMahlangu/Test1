@@ -17,6 +17,7 @@ import time
 import uuid
 import zipfile
 from concurrent.futures import ThreadPoolExecutor
+from collections import OrderedDict
 from pathlib import Path, PurePosixPath
 from urllib.parse import urlsplit
 
@@ -148,9 +149,12 @@ def create_app(data_dir=None):
     executor = ThreadPoolExecutor(max_workers=2, thread_name_prefix='rat-index')
     app.extensions['rat_executor'] = executor
     app.config['RAT_DATA_DIR'] = data
+    result_cache = OrderedDict()
+    cache_lock = threading.Lock()
+    revisions = {}
 
     def registry_db():
-        db = sqlite3.connect(registry, timeout=30)
+        db = sqlite3.connect(registry, timeout=30, factory=engine.ClosingConnection)
         db.row_factory = sqlite3.Row
         return db
 
@@ -265,6 +269,8 @@ def create_app(data_dir=None):
     @app.post('/api/repos/clone')
     def clone():
         body = request.get_json()
+        if not isinstance(body, dict):
+            raise ValueError('Send a JSON object containing url and optional reference.')
         url = validate_url(body.get('url'))
         name = urlsplit(url).path.rstrip('/').rsplit('/', 1)[-1].removesuffix('.git') or 'Repository'
         repo = new_repo(name, url, body.get('reference') or 'HEAD')
@@ -299,10 +305,28 @@ def create_app(data_dir=None):
                            min_timestamp=bounds[0], max_timestamp=bounds[1],
                            paths=[{'path': p, 'kind': 'directory'} for p in sorted(dirs)] + [{'path': p, 'kind': 'file'} for p in paths])
 
+    def cached_metrics(rid):
+        filters = engine.normalize_filters(request.args)
+        with cache_lock:
+            revision = revisions.get(rid, 0)
+            key = (rid, revision, json.dumps(filters, sort_keys=True))
+            if key in result_cache:
+                result_cache.move_to_end(key)
+                return result_cache[key]
+        result = engine.metrics(data / rid / 'metrics.sqlite3', data / rid / 'repo.git', filters)
+        # At most four modest results: large exports remain streamed by the index.
+        if len(result['files']) + len(result['authors']) + len(result['directories']) < 15000:
+            with cache_lock:
+                if revision == revisions.get(rid, 0):
+                    result_cache[key] = result
+                    while len(result_cache) > 4:
+                        result_cache.popitem(last=False)
+        return result
+
     @app.get('/api/repos/<rid>/metrics')
     def metrics(rid):
         get_repo(rid, ready=True)
-        return jsonify(engine.metrics(data / rid / 'metrics.sqlite3', data / rid / 'repo.git', engine.normalize_filters(request.args)))
+        return jsonify(cached_metrics(rid))
 
     @app.get('/api/repos/<rid>/commits')
     def commits(rid):
@@ -321,15 +345,22 @@ def create_app(data_dir=None):
     def merge(rid):
         get_repo(rid, ready=True)
         body = request.get_json()
+        if not isinstance(body, dict) or 'target' not in body or not isinstance(body.get('sources'), list):
+            raise ValueError('Provide a target author ID and a list of source author IDs.')
         target = int(body['target'])
         sources = [int(s) for s in body['sources']]
         engine.merge_authors(data / rid / 'metrics.sqlite3', target, sources)
+        with cache_lock:
+            revisions[rid] = revisions.get(rid, 0) + 1
+            for key in list(result_cache):
+                if key[0] == rid:
+                    del result_cache[key]
         return jsonify(ok=True)
 
     @app.get('/api/repos/<rid>/export.csv')
     def export(rid):
         get_repo(rid, ready=True)
-        result = engine.metrics(data / rid / 'metrics.sqlite3', data / rid / 'repo.git', engine.normalize_filters(request.args))
+        result = cached_metrics(rid)
         return Response(engine.csv_export(result), mimetype='text/csv', headers={'Content-Disposition': 'attachment; filename="rat-file-metrics.csv"'})
 
     @app.delete('/api/repos/<rid>')
@@ -340,6 +371,11 @@ def create_app(data_dir=None):
         with registry_db() as db:
             db.execute('DELETE FROM repos WHERE id=?', (rid,))
         shutil.rmtree(data / rid, ignore_errors=True)
+        with cache_lock:
+            revisions[rid] = revisions.get(rid, 0) + 1
+            for key in list(result_cache):
+                if key[0] == rid:
+                    del result_cache[key]
         return jsonify(ok=True)
 
     return app

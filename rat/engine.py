@@ -55,8 +55,17 @@ def git(repo, *args, input=None, timeout=180):
     return result.stdout
 
 
+class ClosingConnection(sqlite3.Connection):
+    """Commit/rollback a context and release its file descriptors immediately."""
+    def __exit__(self, *args):
+        try:
+            return super().__exit__(*args)
+        finally:
+            self.close()
+
+
 def connect(database):
-    db = sqlite3.connect(database, timeout=60)
+    db = sqlite3.connect(database, timeout=60, factory=ClosingConnection)
     db.row_factory = sqlite3.Row
     db.execute('PRAGMA foreign_keys=ON')
     db.execute('PRAGMA temp_store=MEMORY')
@@ -285,29 +294,68 @@ def scope_sql(filters, prefix='p'):
 
 
 _inventory_cache = OrderedDict()
+_classification_cache = OrderedDict()
 _inventory_lock = threading.Lock()
 
 
-def snapshot_paths(repo, sha):
-    """Git determines text/binary status, including .gitattributes, for a snapshot."""
+def extend_snapshot_paths(repo, sha, paths):
+    """Extend a union using tree metadata first, diffing only unclassified blobs.
+
+    Known union members need no blob reads. This is important for merge-heavy
+    histories: repeatedly diffing every complete tree would rescan all its lines.
+    """
     key = str(repo), sha
+    initially_empty = not paths
     with _inventory_lock:
-        if key in _inventory_cache:
+        cached = _inventory_cache.get(key)
+        if cached is not None:
             _inventory_cache.move_to_end(key)
-            return _inventory_cache[key]
-    output = git(repo, 'diff', '--numstat', '-z', '--no-renames', '--no-ext-diff',
-                 '--no-textconv', EMPTY_TREE, sha, '--')
-    stream = iter(output.split(b'\0'))
+            paths.update(cached)
+            return
+    output = git(repo, 'ls-tree', '-r', '-z', sha)
+    unknown = []
+    for record in output.split(b'\0'):
+        if not record:
+            continue
+        metadata, raw_path = record.split(b'\t', 1)
+        path = raw_path.decode('utf-8', 'replace')
+        if path in paths:
+            continue
+        object_id = metadata.split()[2].decode()
+        cache_key = str(repo), path, object_id
+        with _inventory_lock:
+            known = _classification_cache.get(cache_key)
+        if known is True:
+            paths.add(path)
+        elif known is None:
+            unknown.append((path, cache_key))
+    for offset in range(0, len(unknown), 128):
+        batch = unknown[offset:offset + 128]
+        output = git(repo, 'diff', '--numstat', '-z', '--no-renames', '--no-ext-diff',
+                     '--no-textconv', EMPTY_TREE, sha, '--', *(':(literal)' + p for p, _ in batch))
+        stream = iter(output.split(b'\0'))
+        text_paths = set()
+        for token in stream:
+            if token:
+                change = numstat(token, stream)
+                if change:
+                    text_paths.add(change[0])
+        paths.update(text_paths)
+        with _inventory_lock:
+            for path, cache_key in batch:
+                _classification_cache[cache_key] = path in text_paths
+            while len(_classification_cache) > 50000:
+                _classification_cache.popitem(last=False)
+    if initially_empty:
+        with _inventory_lock:
+            _inventory_cache[key] = paths.copy()
+            while len(_inventory_cache) > 48:
+                _inventory_cache.popitem(last=False)
+
+
+def snapshot_paths(repo, sha):
     paths = set()
-    for token in stream:
-        if token:
-            change = numstat(token, stream)
-            if change:
-                paths.add(change[0])
-    with _inventory_lock:
-        _inventory_cache[key] = paths
-        while len(_inventory_cache) > 48:
-            _inventory_cache.popitem(last=False)
+    extend_snapshot_paths(repo, sha, paths)
     return paths
 
 
@@ -326,13 +374,19 @@ def object_paths(db, repo, selected, total):
     boundaries.update(r['hash'] for r in selected if r['id'] in binary)
     boundaries.update(r['parent'] for r in selected if r['id'] in binary and r['parent'])
     result = set()
-    for sha in boundaries:
-        result.update(snapshot_paths(repo, sha))
     for row in db.execute('''SELECT p.path,d.old_path FROM changes d JOIN paths p ON p.id=d.path_id
                              JOIN selected s ON s.id=d.commit_id'''):
         result.add(row['path'])
         if row['old_path']:
             result.add(row['old_path'])
+    universe = {r[0] for r in db.execute('SELECT path FROM inventory')}
+    # A subset cannot contain objects outside the full history's inventory.
+    # Stop once it is covered: avoids thousands of identical path inventories
+    # for interleaved-author histories while preserving exact object membership.
+    for sha in boundaries:
+        if universe and universe.issubset(result):
+            break
+        extend_snapshot_paths(repo, sha, result)
     return result
 
 

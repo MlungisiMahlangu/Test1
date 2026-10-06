@@ -48,7 +48,7 @@ Select **Import repository → Upload ZIP**. A bare Git repository also works. A
 
 - History is the set of **non-merge commits reachable from the specified reference**. Side-branch commits are included; merge commits contribute no line metrics. Dates are **committer dates**, never author dates.
 - Each commit is compared with its sole parent, or the empty tree for an initial commit. Git's `--numstat -z --find-renames=50%` provides line statistics and binary detection. External diff/textconv drivers are disabled.
-- Added = `+`, removed = `−`, growth = `+ − −`, churn = `+ + −` (i.e. added plus removed).
+- Growth = `added − removed`; churn = `added + removed`.
 - A pure rename contributes zero churn and zero modifications. Rename-and-edit statistics are attributed to the **destination path**; prior changes remain on the paths used at those commits. Deleted files retain their removed-line statistics. Paths are not retroactively rewritten through later renames.
 - Directory statistics recursively sum all descendant files exactly once. Repository statistics are the root directory's statistics.
 - Modifications count **distinct commits with churn > 0** in a scope, not the number of file events. Frequency = modifications / selected commit count. Churn rate = churn / selected commit count. Empty denominators yield 0.
@@ -75,6 +75,10 @@ After startup has installed dependencies:
 ```
 
 Tests generate deterministic local repositories and check initial commits, additions/deletions, recursive directory sums, denominator rules, empty sets, binary exclusions/conversions, rename-only and rename-plus-edit changes, tabs/newlines/Unicode paths, merge exclusion, files created during merges, date boundaries, reference selection, `.mailmap`, manual merging, CSV safety, ingestion, persistence, multirepo isolation, ZIP safety, and HTTP errors. The clone transport unit test is mocked; the real cJSON import is also verified through the browser.
+
+Optional offline demo: `.venv/bin/python tests/demo_fixture.py` creates `.test-artifacts/demo-repository.zip` with 4 commits, 11 additions, 3 removals, and churn 14.
+
+Optional scale test: `.venv/bin/python tests/benchmark.py --commits 100000 --author-query`. A synthetic 100,000-commit/200-file run measured approximately 3.1 seconds to index, 0.7 seconds for root metrics, and 0.12 seconds for an author query (local machine; excludes clone time). Real repositories with large diffs and many merge boundaries can take longer. Files and authors are paginated in the UI; common query results are cached and invalidated after merges.
 
 ## API
 

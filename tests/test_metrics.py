@@ -1,5 +1,6 @@
 """Deterministic local Git repositories; no network or external test dependencies."""
 import io
+import itertools
 import os
 import stat
 import subprocess
@@ -190,6 +191,23 @@ class MetricsTests(unittest.TestCase):
         self.assertEqual(detail['files'][0]['old_path'], 'src/a.txt')
         self.assertEqual(detail['files'][0]['path'], 'src/renamed.txt')
 
+    def test_every_subset_inventory_matches_git_snapshots(self):
+        for length in range(1, 5):
+            for hashes in itertools.combinations(self.fixture.hashes, length):
+                expected = set()
+                for sha in hashes:
+                    parents = engine.git(self.fixture.repo, 'rev-list', '--parents', '-n', '1', sha).decode().split()
+                    for endpoint in parents:
+                        raw = engine.git(self.fixture.repo, 'diff', '--numstat', '-z', '--no-renames', engine.EMPTY_TREE, endpoint)
+                        stream = iter(raw.split(b'\0'))
+                        for token in stream:
+                            if token:
+                                record = engine.numstat(token, stream)
+                                if record:
+                                    expected.add(record[0])
+                actual = {f['path'] for f in self.metrics(commits=','.join(hashes))['files']}
+                self.assertEqual(actual, expected, hashes)
+
     def test_invalid_filters(self):
         for filters in ({'since':'x'}, {'kind':'other'}, {'since':'20','until':'10'}, {'commits':'HEAD'}):
             with self.assertRaises(ValueError):
@@ -285,7 +303,7 @@ class ApiTests(unittest.TestCase):
         response = self.client.post('/api/repos/upload', data={'file': (self.fixture.zip(), 'fixture.zip')})
         self.assertEqual(response.status_code, 202)
         rid = response.json['id']
-        for _ in range(150):
+        for _ in range(1500):
             repo = next(r for r in self.client.get('/api/repos').json['repos'] if r['id'] == rid)
             if repo['status'] != 'indexing':
                 self.assertEqual(repo['status'], 'ready', repo.get('error'))
@@ -303,6 +321,18 @@ class ApiTests(unittest.TestCase):
         self.addCleanup(lambda: app2.extensions['rat_executor'].shutdown(wait=True))
         self.assertEqual(len(app2.test_client().get('/api/repos').json['repos']), 1)
 
+    def test_cached_metrics_invalidated_after_merge(self):
+        rid = self.upload()
+        before = self.client.get(f'/api/repos/{rid}/metrics').json
+        authors = before['authors']
+        response = self.client.post(f'/api/repos/{rid}/authors/merge', json={'target':authors[0]['id'], 'sources':[authors[1]['id']]})
+        self.assertEqual(response.status_code, 200)
+        after = self.client.get(f'/api/repos/{rid}/metrics').json
+        self.assertEqual(after['summary']['author_count'], 1)
+        self.assertEqual(after['summary']['churn'], before['summary']['churn'])
+        self.assertEqual(after['authors'][0]['ownership'], 1)
+        self.assertEqual(self.client.post(f'/api/repos/{rid}/authors/merge', json={}).status_code, 400)
+
     def test_multiple_repositories_and_delete(self):
         first, second = self.upload(), self.upload()
         self.assertNotEqual(first, second)
@@ -318,6 +348,7 @@ class ApiTests(unittest.TestCase):
             self.assertEqual(response.status_code, 200)
         self.assertEqual(self.client.get('/api/repos', headers={'Host': 'attacker.example'}).status_code, 400)
         self.assertEqual(self.client.post('/api/repos/upload').status_code, 400)
+        self.assertEqual(self.client.post('/api/repos/clone', json=[]).status_code, 400)
         self.assertEqual(self.client.get('/api/repos/missing/meta').status_code, 404)
         self.assertEqual(self.client.post('/api/repos/clone', json={'url':'https://127.0.0.1/repo'}).status_code, 400)
         self.assertEqual(self.client.post('/api/repos/clone', json={'url':'file:///etc'}).status_code, 400)

@@ -22,7 +22,7 @@
     repos: [], id: null, meta: null, metrics: null, context: makeContext(), tab: 'overview',
     metaLoading: false, metricsLoading: false, commitsLoading: false, dataFailed: false,
     commits: null, page: 1, perPage: 50, query: '', fileKind: 'files', chart: 'changes',
-    fileSort: { key: 'churn', direction: -1 }, authorSort: { key: 'ownership', direction: -1 },
+    fileSort: { key: 'churn', direction: -1 }, authorSort: { key: 'ownership', direction: -1 }, filePage: 1, authorPage: 1,
     epoch: 0, metaVersion: 0, metricVersion: 0, commitVersion: 0, listRevision: 0, listBusy: false,
     pollTimer: null, online: false, importMode: 'clone', file: null, detailVersion: 0,
     exporting: false, mergeId: null, mergeAuthors: [], deleteId: null
@@ -249,7 +249,8 @@
     syncFilterInputs();
   }
   function populatePaths() {
-    $('path-options').innerHTML = array(state.meta?.paths).filter(item => item.kind === $('filter-kind').value).map(item => `<option value="${esc(item.path)}"></option>`).join('');
+    const query = $('filter-path').value.toLocaleLowerCase();
+    $('path-options').innerHTML = array(state.meta?.paths).filter(item => item.kind === $('filter-kind').value && item.path.toLocaleLowerCase().includes(query)).slice(0, 500).map(item => `<option value="${esc(item.path)}"></option>`).join('');
   }
   function syncFilterInputs() {
     const filters = state.context.filters;
@@ -278,6 +279,7 @@
   }
   function applyFilters(filters) {
     state.context.filters = filters;
+    state.filePage = 1; state.authorPage = 1;
     state.commits = null; state.page = 1;
     cancelRequest('commits'); state.commitVersion++; state.commitsLoading = false;
     syncFilterInputs(); renderScope(); renderCommits(); loadMetrics();
@@ -367,17 +369,28 @@
     return rows.slice().sort((a, b) => sort.direction * (['path', 'name'].includes(sort.key) ? String(a[sort.key] ?? '').localeCompare(String(b[sort.key] ?? ''), 'en', { numeric: true }) : number(a[sort.key]) - number(b[sort.key])));
   }
   function metricCell(key, value) { return `<td class="number ${key === 'added' ? 'positive' : key === 'removed' || (key === 'growth' && number(value) < 0) ? 'negative' : ''}">${fmt(value)}</td>`; }
+  function pagedRows(rows, kind) {
+    const key = kind === 'file' ? 'filePage' : 'authorPage';
+    const last = Math.max(1, Math.ceil(rows.length / 100));
+    state[key] = Math.min(Math.max(1, state[key]), last);
+    const offset = (state[key] - 1) * 100;
+    text(`${kind}-page-label`, rows.length ? `${fmt(offset + 1)}–${fmt(Math.min(offset + 100, rows.length))} of ${fmt(rows.length)} · Page ${state[key]} of ${last}` : 'No results');
+    $(`${kind}-prev`).disabled = state[key] <= 1;
+    $(`${kind}-next`).disabled = state[key] >= last;
+    return rows.slice(offset, offset + 100);
+  }
   function renderFiles() {
     $('file-table-head').innerHTML = tableHead(fileColumns, state.fileSort, 'files');
     const search = $('file-search').value.toLocaleLowerCase();
     const rows = sorted(array(state.metrics?.[state.fileKind]).filter(row => String(row.path).toLocaleLowerCase().includes(search)), state.fileSort);
     const kind = state.fileKind === 'files' ? 'file' : 'directory';
     text('file-result-count', `${fmt(rows.length)} ${state.fileKind}`);
-    $('file-table-body').innerHTML = rows.length ? rows.map(row => `<tr><td><button class="path-button mono" data-scope-path="${esc(row.path)}" data-scope-kind="${kind}">${icon(kind === 'file' ? 'file' : 'folder')}${esc(row.path || '/ (repository root)')}</button></td>${fileColumns.slice(1).map(([key]) => metricCell(key, row[key])).join('')}</tr>`).join('') : `<tr class="table-empty"><td colspan="8">${search && state.metrics ? emptyState('search', 'No matching paths', 'Try another search. This only searches the current results.') : emptyMessage('file')}</td></tr>`;
+    const visible = pagedRows(rows, 'file');
+    $('file-table-body').innerHTML = rows.length ? visible.map(row => `<tr><td><button class="path-button mono" data-scope-path="${esc(row.path)}" data-scope-kind="${kind}">${icon(kind === 'file' ? 'file' : 'folder')}${esc(row.path || '/ (repository root)')}</button></td>${fileColumns.slice(1).map(([key]) => metricCell(key, row[key])).join('')}</tr>`).join('') : `<tr class="table-empty"><td colspan="8">${search && state.metrics ? emptyState('search', 'No matching paths', 'Try another search. This only searches the current results.') : emptyMessage('file')}</td></tr>`;
   }
   function renderAuthors() {
     $('author-table-head').innerHTML = tableHead(authorColumns, state.authorSort, 'authors');
-    const rows = sorted(array(state.metrics?.authors), state.authorSort);
+    const rows = pagedRows(sorted(array(state.metrics?.authors), state.authorSort), 'author');
     const identities = new Map(array(state.meta?.authors).map(author => [String(author.id), author]));
     $('author-table-body').innerHTML = rows.length ? rows.map((author, index) => {
       const aliases = array(identities.get(String(author.id))?.aliases);
@@ -603,6 +616,7 @@
       const sort = state[target.dataset.sortTable === 'files' ? 'fileSort' : 'authorSort'];
       sort.direction = sort.key === target.dataset.sortKey ? sort.direction * -1 : ['path', 'name'].includes(target.dataset.sortKey) ? 1 : -1;
       sort.key = target.dataset.sortKey;
+      state[target.dataset.sortTable === 'files' ? 'filePage' : 'authorPage'] = 1;
       target.dataset.sortTable === 'files' ? renderFiles() : renderAuthors();
       document.querySelector(`[data-sort-table="${target.dataset.sortTable}"][data-sort-key="${target.dataset.sortKey}"]`)?.focus();
     }
@@ -638,12 +652,13 @@
   $('retry-commits').addEventListener('click', loadCommits);
   $('filter-form').addEventListener('submit', event => { event.preventDefault(); const filters = readFilters(); if (filters) applyFilters(filters); });
   $('filter-kind').addEventListener('change', () => { $('filter-path').setCustomValidity(''); populatePaths(); });
-  $('filter-path').addEventListener('input', () => $('filter-path').setCustomValidity(''));
+  $('filter-path').addEventListener('input', () => { $('filter-path').setCustomValidity(''); populatePaths(); });
   for (const key of ['since', 'until']) $(`filter-${key}`).addEventListener('input', () => $('filter-until').setCustomValidity(''));
   $('date-toggle').addEventListener('click', () => { $('date-filters').hidden = !$('date-filters').hidden; $('date-toggle').setAttribute('aria-expanded', String(!$('date-filters').hidden)); if (!$('date-filters').hidden) $('filter-since').focus(); });
   $('reset-filters').addEventListener('click', () => { state.context.selected.clear(); state.query = ''; $('commit-search').value = ''; $('file-search').value = ''; applyFilters(freshFilters()); announce('All analysis filters and commit selections cleared.'); });
-  $('file-search').addEventListener('input', renderFiles);
-  for (const kind of ['files', 'directories']) $(`show-${kind}`).addEventListener('click', () => { state.fileKind = kind; for (const option of ['files', 'directories']) { $(`show-${option}`).classList.toggle('selected', option === kind); $(`show-${option}`).setAttribute('aria-pressed', String(option === kind)); } renderFiles(); });
+  $('file-search').addEventListener('input', () => { state.filePage = 1; renderFiles(); });
+  for (const kind of ['file', 'author']) for (const direction of ['prev', 'next']) $(`${kind}-${direction}`).addEventListener('click', () => { state[kind === 'file' ? 'filePage' : 'authorPage'] += direction === 'next' ? 1 : -1; kind === 'file' ? renderFiles() : renderAuthors(); });
+  for (const kind of ['files', 'directories']) $(`show-${kind}`).addEventListener('click', () => { state.fileKind = kind; state.filePage = 1; for (const option of ['files', 'directories']) { $(`show-${option}`).classList.toggle('selected', option === kind); $(`show-${option}`).setAttribute('aria-pressed', String(option === kind)); } renderFiles(); });
   for (const mode of ['changes', 'churn']) $(`chart-${mode}`).addEventListener('click', () => { state.chart = mode; for (const option of ['changes', 'churn']) { $(`chart-${option}`).classList.toggle('selected', option === mode); $(`chart-${option}`).setAttribute('aria-pressed', String(option === mode)); } renderTimeline(); });
   $('timeline-data').addEventListener('click', () => {
     $('timeline-table').innerHTML = `<table><thead><tr><th>Date</th>${['Added', 'Removed', 'Growth', 'Churn', 'Commits'].map(label => `<th class="number">${label}</th>`).join('')}</tr></thead><tbody>${array(state.metrics?.timeline).map(row => `<tr><td>${esc(row.date)}</td>${['added', 'removed', 'growth', 'churn', 'commits'].map(key => metricCell(key, row[key])).join('')}</tr>`).join('')}</tbody></table>`;
