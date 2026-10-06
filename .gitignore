@@ -17,6 +17,9 @@ target/
 .env
 .env.*
 *.local
+.token
+/token
+.git-cred-helper.sh
 
 # Logs
 *.log
